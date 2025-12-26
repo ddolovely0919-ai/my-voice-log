@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1on1 Voice Log (Auto-Save)</title>
+    <style>
+        /* 스타일은 깔끔한 노션 스타일 유지 */
+        :root {
+            --bg-color: #ffffff;
+            --text-main: #37352f;
+            --text-sub: #787774;
+            --accent: #2383e2;
+            --border: #e0e0e0;
+        }
+        body { margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); height: 100vh; box-sizing: border-box; display: flex; justify-content: center; }
+        .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; max-width: 1200px; width: 100%; height: 95vh; }
+        @media (max-width: 768px) { .layout { grid-template-columns: 1fr; height: auto; display: block; } .section { margin-bottom: 30px; height: 500px; } }
+        
+        .section { display: flex; flex-direction: column; overflow: hidden; position: relative; height: 100%; }
+        header { display: flex; flex-direction: column; gap: 10px; padding-bottom: 15px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
+        h2 { margin: 0; font-size: 1.4rem; font-weight: 700; }
+        
+        .input-row { display: flex; gap: 8px; margin-top: 5px; }
+        input { padding: 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 0.9rem; width: 100%; box-sizing: border-box; }
+        input:focus { outline: 2px solid #dbebfb; border-color: var(--accent); }
+        
+        /* 버튼 */
+        button { border: none; padding: 10px; border-radius: 4px; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        .btn-record { background: #fff; border: 1px solid var(--border); color: var(--text-sub); width: 100%; }
+        .btn-record.active { background: #ffebeb; color: #d8000c; border-color: #d8000c; animation: pulse 1.5s infinite; }
+        .btn-ai { background: var(--accent); color: white; width: 100%; margin-top: 10px; }
+        .btn-save { background: #333; color: white; width: 100%; margin-top: 10px; }
+        .btn-mini { padding: 4px 8px; font-size: 0.8rem; background: #f0f0f0; }
+
+        /* 텍스트 영역 */
+        #script-area, #summary-area { flex: 1; overflow-y: auto; line-height: 1.6; padding: 10px; border: 1px solid transparent; outline: none; white-space: pre-wrap; }
+        #script-area:hover, #summary-area:hover { background: #f9f9f9; border-radius: 4px; }
+        [contenteditable]:empty:before { content: attr(placeholder); color: #ccc; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+        .spinner { display: none; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 1s infinite; margin: 0 auto; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="layout">
+        <div class="section">
+            <header>
+                <h2>🎙️ 대화 기록</h2>
+                <input type="text" id="target-name" placeholder="참석자 이름 (예: 김철수)" oninput="saveSettings()" />
+                <div class="input-row">
+                    <input type="password" id="api-key" placeholder="Gemini API Key (저장됨)" oninput="saveSettings()" />
+                    <button class="btn-mini" onclick="fetchModels()">모델찾기</button>
+                </div>
+                <select id="model-select" onchange="saveSettings()" style="width:100%; padding:8px; margin-top:5px; border:1px solid #e0e0e0; border-radius:4px;">
+                    <option value="">모델을 찾아주세요</option>
+                </select>
+            </header>
+            <div id="script-area" contenteditable="true" placeholder="녹음 내용이 여기에 표시됩니다..."></div>
+            <button id="btn-record" class="btn-record" onclick="toggleRecord()">🎙️ 녹음 시작</button>
+            <button onclick="clearAll()" style="background:none; color:#aaa; font-size:0.8rem; margin-top:5px;">🗑️ 초기화</button>
+        </div>
+
+        <div class="section">
+            <header>
+                <h2>✨ AI & Notion</h2>
+                <input type="text" id="apps-script-url" placeholder="Google Apps Script URL (Notion Proxy)" oninput="saveSettings()" />
+            </header>
+            <div id="summary-area" contenteditable="true" placeholder="AI 요약 결과가 여기에 표시됩니다."></div>
+            <div style="margin-top: auto;">
+                <button id="btn-ai" class="btn-ai" onclick="callGemini()">
+                    <span id="btn-text">✨ 요약하기</span>
+                    <div id="loading-spinner" class="spinner"></div>
+                </button>
+                <button class="btn-save" onclick="saveToNotion()">📥 Notion 저장</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. 자동 저장 및 복원 로직 ---
+        window.onload = function() {
+            // 저장된 값 불러오기
+            if(localStorage.getItem('targetName')) document.getElementById('target-name').value = localStorage.getItem('targetName');
+            if(localStorage.getItem('apiKey')) document.getElementById('api-key').value = localStorage.getItem('apiKey');
+            if(localStorage.getItem('appsScriptUrl')) document.getElementById('apps-script-url').value = localStorage.getItem('appsScriptUrl');
+            
+            // 모델 리스트가 있다면 복원 시도 (UX 향상)
+            if(document.getElementById('api-key').value) fetchModels(true);
+        }
+
+        function saveSettings() {
+            localStorage.setItem('targetName', document.getElementById('target-name').value);
+            localStorage.setItem('apiKey', document.getElementById('api-key').value);
+            localStorage.setItem('appsScriptUrl', document.getElementById('apps-script-url').value);
+            const model = document.getElementById('model-select').value;
+            if(model) localStorage.setItem('selectedModel', model);
+        }
+
+        // --- 2. 기본 기능 (모델 찾기, 녹음, AI, 저장) ---
+        async function fetchModels(isAuto = false) {
+            const key = document.getElementById('api-key').value.trim();
+            const select = document.getElementById('model-select');
+            if (!key) return isAuto ? null : alert("API Key가 없습니다.");
+            
+            try {
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+                const data = await res.json();
+                if(data.error) throw new Error(data.error.message);
+                
+                select.innerHTML = "";
+                const valid = data.models.filter(m => m.supportedGenerationMethods?.includes("generateContent"));
+                
+                valid.forEach(m => {
+                    const name = m.name.replace("models/", "");
+                    const opt = document.createElement("option");
+                    opt.value = name; opt.text = name;
+                    select.appendChild(opt);
+                });
+
+                // 저장된 모델이 있으면 선택 복구
+                const savedModel = localStorage.getItem('selectedModel');
+                if(savedModel && Array.from(select.options).some(o => o.value === savedModel)) {
+                    select.value = savedModel;
+                } else if (valid.length > 0) {
+                    select.value = valid[0].name.replace("models/", ""); // 기본값
+                }
+                
+                if(!isAuto) alert("모델 목록을 갱신했습니다!");
+            } catch(e) { console.error(e); if(!isAuto) alert("모델 로드 실패: " + e.message); }
+        }
+
+        const scriptArea = document.getElementById('script-area');
+        const recordBtn = document.getElementById('btn-record');
+        let recognition, isRecording = false;
+
+        if ('webkitSpeechRecognition' in window) {
+            recognition = new webkitSpeechRecognition();
+            recognition.continuous = true; recognition.interimResults = true; recognition.lang = 'ko-KR';
+            recognition.onresult = e => {
+                let final = '', interim = '';
+                for (let i = e.resultIndex; i < e.results.length; ++i) {
+                    if (e.results[i].isFinal) final += e.results[i][0].transcript;
+                    else interim += e.results[i][0].transcript;
+                }
+                if(final) {
+                    const div = document.createElement('div'); div.innerText = "- " + final; div.style.marginBottom="10px";
+                    const iDiv = document.getElementById('interim'); iDiv ? scriptArea.insertBefore(div, iDiv) : scriptArea.appendChild(div);
+                }
+                let iDiv = document.getElementById('interim');
+                if(!iDiv) { iDiv = document.createElement('div'); iDiv.id='interim'; iDiv.style.color='#999'; scriptArea.appendChild(iDiv); }
+                iDiv.innerText = interim;
+                scriptArea.scrollTop = scriptArea.scrollHeight;
+            };
+            recognition.onend = () => { if(isRecording) recognition.start(); };
+        }
+
+        function toggleRecord() {
+            if(!recognition) return alert("크롬 브라우저를 사용해주세요.");
+            if(isRecording) { isRecording = false; recognition.stop(); recordBtn.classList.remove('active'); recordBtn.innerText = "🎙️ 녹음 시작"; document.getElementById('interim')?.remove(); }
+            else { isRecording = true; recognition.start(); recordBtn.classList.add('active'); recordBtn.innerText = "⏹️ 녹음 중지"; }
+        }
+        function clearAll() { scriptArea.innerHTML = ""; document.getElementById('summary-area').innerHTML = ""; }
+
+        async function callGemini() {
+            const key = document.getElementById('api-key').value;
+            const model = document.getElementById('model-select').value;
+            const text = scriptArea.innerText;
+            if(!key || !model || text.length < 5) return alert("설정과 대화 내용을 확인하세요.");
+            
+            document.getElementById('btn-text').style.display='none';
+            document.getElementById('loading-spinner').style.display='block';
+            
+            try {
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ contents: [{ parts: [{ text: `다음 1on1 미팅 내용을 요약해줘:\n${text}` }] }] })
+                });
+                const data = await res.json();
+                document.getElementById('summary-area').innerText = data.candidates[0].content.parts[0].text;
+            } catch(e) { alert("AI 오류: " + e.message); }
+            finally { document.getElementById('btn-text').style.display='block'; document.getElementById('loading-spinner').style.display='none'; }
+        }
+
+        function saveToNotion() {
+            const url = document.getElementById('apps-script-url').value;
+            const name = document.getElementById('target-name').value;
+            const summary = document.getElementById('summary-area').innerText;
+            const script = scriptArea.innerText;
+            if(!url || !name || !summary) return alert("필수 정보가 누락되었습니다.");
+            
+            if(confirm("Notion에 저장할까요?")) {
+                fetch(url, { method: 'POST', mode: 'no-cors', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ name, summary, script }) })
+                .then(() => alert("저장 요청 완료! (Notion을 확인하세요)"))
+                .catch(e => alert("전송 실패"));
+            }
+        }
+    </script>
+</body>
+</html>
